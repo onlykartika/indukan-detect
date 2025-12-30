@@ -112,13 +112,14 @@ def upload():
         os.remove(filename)
         return jsonify({"error": "roboflow error", "detail": str(e)}), 500
 
-    # ===== UPLOAD IMAGE TO GITHUB (OPTIONAL) =====
+    # ===== UPLOAD IMAGE TO GITHUB (SAFE, NO SUBFOLDER) =====
     try:
         with open(filename, "rb") as f:
             content = base64.b64encode(f.read()).decode()
 
+        # FIX: JANGAN pakai /{esp_id}/
         requests.put(
-            f"{GITHUB_API_IMAGES}/{esp_id}/{filename}",
+            f"{GITHUB_API_IMAGES}/{filename}",
             headers=GITHUB_HEADERS,
             json={
                 "message": f"upload {filename}",
@@ -126,24 +127,37 @@ def upload():
             },
             timeout=10
         )
-    except:
-        pass
+    except Exception as e:
+        print("[WARN] GitHub upload failed:", e)
 
     os.remove(filename)
 
-    # ===== PARSE RESULT =====
+    # ===== PARSE ROBOFLOW RESULT (FIX TOTAL) =====
     predictions = []
+
     if isinstance(result, dict) and "predictions" in result:
         predictions = result["predictions"]
+
     elif isinstance(result, list):
         for item in result:
-            if isinstance(item, dict) and "predictions" in item:
-                predictions.extend(item["predictions"])
+            if not isinstance(item, dict):
+                continue
 
+            preds = item.get("predictions")
+            if isinstance(preds, list):
+                predictions.extend(preds)
+            elif isinstance(preds, dict) and "predictions" in preds:
+                predictions.extend(preds["predictions"])
+
+    # ===== FILTER FEMALE =====
     filtered = []
     for p in predictions:
+        if not isinstance(p, dict):
+            continue
+
         label = p.get("class") or p.get("label")
         conf = p.get("confidence") or p.get("score") or 0
+
         if label and label.lower() == TARGET_LABEL and conf >= CONF_THRESHOLD:
             filtered.append({
                 "label": label,
@@ -169,7 +183,7 @@ def upload():
         "total_detected_all_esp": total_all,
         "per_esp": ESP_RESULTS,
         "objects": filtered
-    })
+    }), 200
 
 # ================= SUMMARY =================
 @app.route("/summary", methods=["GET"])
