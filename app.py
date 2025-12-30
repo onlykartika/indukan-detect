@@ -21,7 +21,7 @@ if not GITHUB_TOKEN:
 
 # ================= PERSISTENT STORAGE =================
 ESP_RESULTS_FILE = "esp_results.json"
-ESP_RESULTS = {}  # { esp_id: { count: int, last_update: int } }
+ESP_RESULTS = {}
 ESP_LOCK = Lock()
 
 # ================= GITHUB CONFIG =================
@@ -38,25 +38,28 @@ GITHUB_HEADERS = {
 # ================= LOAD / SAVE RESULTS =================
 def load_esp_results():
     global ESP_RESULTS
-    # 1. Load dari local file
+
+    # 1. Load local
     if os.path.exists(ESP_RESULTS_FILE):
         try:
             with open(ESP_RESULTS_FILE, "r") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    ESP_RESULTS = data
-                    print("[INFO] Loaded esp_results from local file")
-                    return
+                ESP_RESULTS = json.load(f)
+                print("[INFO] Loaded esp_results from local file")
+                return
         except Exception as e:
             print(f"[ERROR] Failed load local: {e}")
 
-    # 2. Fallback ke GitHub
+    # 2. Fallback GitHub
     try:
-        res = requests.get(f"{GITHUB_API_ROOT}/esp_results.json", headers=GITHUB_HEADERS, timeout=10)
+        res = requests.get(
+            f"{GITHUB_API_ROOT}/esp_results.json",
+            headers=GITHUB_HEADERS,
+            timeout=10
+        )
         if res.status_code == 200:
-            content = base64.b64decode(res.json()["content"]).decode('utf-8')
+            content = base64.b64decode(res.json()["content"]).decode()
             ESP_RESULTS = json.loads(content)
-            save_esp_results()  # sync ke local
+            save_esp_results()
             print("[INFO] Loaded esp_results from GitHub")
             return
     except Exception as e:
@@ -76,6 +79,7 @@ load_esp_results()
 
 # ================= ROBOFLOW =================
 rf_client = None
+
 def get_rf_client():
     global rf_client
     if rf_client is None:
@@ -93,7 +97,7 @@ CONF_THRESHOLD = 0.6
 # ================= HEALTH =================
 @app.route("/", methods=["GET"])
 def health():
-    return "AI server running (Female Chicken Detection) - Ready!"
+    return "AI server running (Female Detection) - Ready!"
 
 # ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
@@ -107,7 +111,7 @@ def upload():
 
     print(f"[INFO] Upload dari {esp_id}, size: {len(request.data)} bytes")
 
-    # Simpan sementara
+    # Save sementara
     try:
         with open(filename, "wb") as f:
             f.write(request.data)
@@ -126,10 +130,9 @@ def upload():
         print("[INFO] Roboflow workflow selesai")
     except Exception as e:
         os.remove(filename)
-        print(f"[ERROR] Roboflow gagal: {e}")
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
 
-    # ===== UPLOAD GAMBAR KE GITHUB (best effort) =====
+    # ===== UPLOAD IMAGE TO GITHUB =====
     try:
         with open(filename, "rb") as f:
             content_b64 = base64.b64encode(f.read()).decode()
@@ -144,18 +147,18 @@ def upload():
             },
             timeout=15
         )
+
         if res.status_code in (200, 201):
-            print(f"[INFO] Gambar uploaded ke GitHub: {esp_id}/{filename}")
+            print("[INFO] Image uploaded to GitHub")
         else:
-            print(f"[WARN] GitHub upload gagal ({res.status_code}): {res.text}")
+            print(f"[WARN] GitHub upload gagal: {res.status_code}")
     except Exception as e:
         print(f"[WARN] GitHub upload error: {e}")
 
-    # Hapus file lokal
     if os.path.exists(filename):
         os.remove(filename)
 
-    # ===== PARSE PREDICTIONS (robust untuk workflow baru) =====
+    # ===== PARSE PREDICTIONS =====
     predictions = []
     if isinstance(result, dict) and "predictions" in result:
         predictions = result["predictions"]
@@ -170,6 +173,7 @@ def upload():
             continue
         label = p.get("class") or p.get("label")
         conf = p.get("confidence") or p.get("score") or 0
+
         if label and label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
             filtered.append({
                 "label": label,
@@ -178,7 +182,7 @@ def upload():
 
     detected_count = len(filtered)
 
-    # ===== UPDATE RESULTS & BACKUP KE GITHUB =====
+    # ===== UPDATE RESULTS & BACKUP =====
     with ESP_LOCK:
         ESP_RESULTS[esp_id] = {
             "count": detected_count,
@@ -186,13 +190,15 @@ def upload():
         }
         save_esp_results()
 
-        # Backup esp_results.json ke GitHub
         try:
-            json_content = json.dumps(ESP_RESULTS).encode('utf-8')
+            json_content = json.dumps(ESP_RESULTS).encode()
             content_b64 = base64.b64encode(json_content).decode()
 
-            # Ambil SHA kalau sudah ada
-            get_res = requests.get(f"{GITHUB_API_ROOT}/esp_results.json", headers=GITHUB_HEADERS, timeout=10)
+            get_res = requests.get(
+                f"{GITHUB_API_ROOT}/esp_results.json",
+                headers=GITHUB_HEADERS,
+                timeout=10
+            )
             sha = get_res.json().get("sha") if get_res.status_code == 200 else None
 
             put_data = {
@@ -202,11 +208,12 @@ def upload():
             if sha:
                 put_data["sha"] = sha
 
-            put_res = requests.put(f"{GITHUB_API_ROOT}/esp_results.json", headers=GITHUB_HEADERS, json=put_data, timeout=15)
-            if put_res.status_code in (200, 201):
-                print("[INFO] esp_results.json updated di GitHub")
-            else:
-                print(f"[WARN] GitHub JSON update gagal: {put_res.status_code}")
+            requests.put(
+                f"{GITHUB_API_ROOT}/esp_results.json",
+                headers=GITHUB_HEADERS,
+                json=put_data,
+                timeout=15
+            )
         except Exception as e:
             print(f"[WARN] Backup JSON error: {e}")
 
