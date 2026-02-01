@@ -13,7 +13,6 @@ app = Flask(__name__)
 # ================= ENV =================
 ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-
 if not ROBOFLOW_API_KEY:
     raise ValueError("ROBOFLOW_API_KEY environment variable is required")
 if not GITHUB_TOKEN:
@@ -38,7 +37,6 @@ GITHUB_HEADERS = {
 # ================= LOAD / SAVE RESULTS =================
 def load_esp_results():
     global ESP_RESULTS
-
     # 1. Load local
     if os.path.exists(ESP_RESULTS_FILE):
         try:
@@ -91,8 +89,8 @@ def get_rf_client():
 
 WORKSPACE_NAME = "my-workspace-rrwxa"
 WORKFLOW_ID = "detect-count-and-visualize"
-TARGET_LABEL = "male"
-CONF_THRESHOLD = 0.6
+TARGET_LABEL = "male"  # Diubah ke "male" karena model kamu pakai ini
+CONF_THRESHOLD = 0.4   # Diturunkan untuk tes (bisa naik lagi nanti)
 
 # ================= HEALTH =================
 @app.route("/", methods=["GET"])
@@ -108,7 +106,6 @@ def upload():
     esp_id = request.headers.get("X-ESP-ID", "unknown")
     timestamp = int(time.time())
     filename = f"{esp_id}_{timestamp}.jpg"
-
     print(f"[INFO] Upload dari {esp_id}, size: {len(request.data)} bytes")
 
     # Save sementara
@@ -158,21 +155,23 @@ def upload():
     if os.path.exists(filename):
         os.remove(filename)
 
-    # ===== PARSE PREDICTIONS =====
+    # ===== PARSE PREDICTIONS (diperbaiki - lebih robust seperti di Colab) =====
     predictions = []
-    if isinstance(result, dict) and "predictions" in result:
+
+    # Cek struktur output workflow (biasanya list dengan predictions di index 0)
+    if isinstance(result, list) and len(result) > 0:
+        first_item = result[0]
+        if isinstance(first_item, dict) and "predictions" in first_item:
+            predictions = first_item["predictions"]
+    elif isinstance(result, dict) and "predictions" in result:
         predictions = result["predictions"]
-    elif isinstance(result, list):
-        for item in result:
-            if isinstance(item, dict) and "predictions" in item:
-                predictions.extend(item["predictions"])
 
     filtered = []
     for p in predictions:
         if not isinstance(p, dict):
             continue
-        label = p.get("class") or p.get("label")
-        conf = p.get("confidence") or p.get("score") or 0
+        label = p.get("class") or p.get("label") or ""
+        conf = p.get("confidence") or p.get("score") or 0.0
 
         if label and label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
             filtered.append({
@@ -222,7 +221,7 @@ def upload():
     return jsonify({
         "status": "ok",
         "esp_id": esp_id,
-        "detected_female_this_esp": detected_count,
+        "detected_female_this_esp": detected_count,  # Bisa diganti jadi "detected_male_this_esp" kalau mau
         "total_detected_all_esp": total_all,
         "per_esp": ESP_RESULTS,
         "objects": filtered
