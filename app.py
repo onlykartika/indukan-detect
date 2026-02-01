@@ -91,7 +91,7 @@ def get_rf_client():
 
 WORKSPACE_NAME = "my-workspace-rrwxa"
 WORKFLOW_ID = "detect-count-and-visualize"
-TARGET_LABEL = "female"
+TARGET_LABEL = "male"
 CONF_THRESHOLD = 0.6
 
 # ================= HEALTH =================
