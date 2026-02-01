@@ -37,7 +37,6 @@ GITHUB_HEADERS = {
 # ================= LOAD / SAVE RESULTS =================
 def load_esp_results():
     global ESP_RESULTS
-    # 1. Load local
     if os.path.exists(ESP_RESULTS_FILE):
         try:
             with open(ESP_RESULTS_FILE, "r") as f:
@@ -47,7 +46,6 @@ def load_esp_results():
         except Exception as e:
             print(f"[ERROR] Failed load local: {e}")
 
-    # 2. Fallback GitHub
     try:
         res = requests.get(
             f"{GITHUB_API_ROOT}/esp_results.json",
@@ -89,8 +87,8 @@ def get_rf_client():
 
 WORKSPACE_NAME = "my-workspace-rrwxa"
 WORKFLOW_ID = "detect-count-and-visualize"
-TARGET_LABEL = "male"  # Diubah ke "male" karena model kamu pakai ini
-CONF_THRESHOLD = 0.4   # Diturunkan untuk tes (bisa naik lagi nanti)
+TARGET_LABEL = "male"          # Sama seperti di Colab kamu
+CONF_THRESHOLD = 0.4           # Bisa diubah ke 0.3 kalau masih 0
 
 # ================= HEALTH =================
 @app.route("/", methods=["GET"])
@@ -122,9 +120,14 @@ def upload():
             workspace_name=WORKSPACE_NAME,
             workflow_id=WORKFLOW_ID,
             images={"image": filename},
-            use_cache=False
+            use_cache=False  # Sama seperti Colab, tapi False biar fresh
         )
         print("[INFO] Roboflow workflow selesai")
+
+        # DEBUG: Print raw result supaya kelihatan di Render Logs
+        print("[DEBUG] Raw result type:", type(result))
+        print("[DEBUG] Raw result:", json.dumps(result, indent=2, default=str))
+
     except Exception as e:
         os.remove(filename)
         return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
@@ -144,40 +147,43 @@ def upload():
             },
             timeout=15
         )
-
         if res.status_code in (200, 201):
             print("[INFO] Image uploaded to GitHub")
         else:
-            print(f"[WARN] GitHub upload gagal: {res.status_code}")
+            print(f"[WARN] GitHub upload gagal: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"[WARN] GitHub upload error: {e}")
 
     if os.path.exists(filename):
         os.remove(filename)
 
-    # ===== PARSE PREDICTIONS (diperbaiki - lebih robust seperti di Colab) =====
-    predictions = []
+    # ===== PARSE PREDICTIONS - PERSIS seperti di Colab kamu =====
+    predictions_list = None
 
-    # Cek struktur output workflow (biasanya list dengan predictions di index 0)
-    if isinstance(result, list) and len(result) > 0:
-        first_item = result[0]
-        if isinstance(first_item, dict) and "predictions" in first_item:
-            predictions = first_item["predictions"]
-    elif isinstance(result, dict) and "predictions" in result:
-        predictions = result["predictions"]
+    # Extract raw predictions dari berbagai kemungkinan struktur
+    raw_predictions_output = None
+    if isinstance(result, dict) and "predictions" in result:
+        raw_predictions_output = result["predictions"]
+    elif isinstance(result, list) and result and "predictions" in result[0]:
+        raw_predictions_output = result[0]["predictions"]
+
+    # Normalisasi jadi list of prediction objects
+    if raw_predictions_output:
+        if isinstance(raw_predictions_output, list):
+            predictions_list = raw_predictions_output
+        elif isinstance(raw_predictions_output, dict) and "predictions" in raw_predictions_output:
+            predictions_list = raw_predictions_output["predictions"]
 
     filtered = []
-    for p in predictions:
-        if not isinstance(p, dict):
-            continue
-        label = p.get("class") or p.get("label") or ""
-        conf = p.get("confidence") or p.get("score") or 0.0
-
-        if label and label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
-            filtered.append({
-                "label": label,
-                "confidence": round(conf * 100, 2)
-            })
+    if predictions_list:
+        for p in predictions_list:
+            label = p.get("class") or p.get("label") or "obj"
+            conf = p.get("confidence") or p.get("score") or 0
+            if label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
+                filtered.append({
+                    "label": label,
+                    "confidence": round(conf * 100, 2)
+                })
 
     detected_count = len(filtered)
 
@@ -221,7 +227,7 @@ def upload():
     return jsonify({
         "status": "ok",
         "esp_id": esp_id,
-        "detected_female_this_esp": detected_count,  # Bisa diganti jadi "detected_male_this_esp" kalau mau
+        "detected_this_esp": detected_count,  # Ubah nama biar netral (male/female)
         "total_detected_all_esp": total_all,
         "per_esp": ESP_RESULTS,
         "objects": filtered
