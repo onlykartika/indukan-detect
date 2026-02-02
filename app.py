@@ -7,7 +7,6 @@ from flask import Flask, request, jsonify
 from inference_sdk import InferenceHTTPClient
 from threading import Lock
 
-# ================= FLASK APP =================
 app = Flask(__name__)
 
 # ================= ENV =================
@@ -24,9 +23,8 @@ ESP_RESULTS = {}
 ESP_LOCK = Lock()
 
 # ================= GITHUB CONFIG =================
-GITHUB_REPO = "onlykartika/indukan-detect"
+GITHUB_REPO = "onlykartika/ESP32-CAM"  # Ubah ke repo yang benar kalau Kolam B
 GITHUB_FOLDER = "images"
-GITHUB_API_IMAGES = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
 GITHUB_API_ROOT = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
 GITHUB_HEADERS = {
     "Authorization": f"token {GITHUB_TOKEN}",
@@ -46,17 +44,15 @@ def load_esp_results():
         except Exception as e:
             print(f"[ERROR] Failed load local: {e}")
 
+    # Fallback GitHub
     try:
-        res = requests.get(
-            f"{GITHUB_API_ROOT}/esp_results.json",
-            headers=GITHUB_HEADERS,
-            timeout=10
-        )
+        res = requests.get(f"{GITHUB_API_ROOT}/esp_results.json", headers=GITHUB_HEADERS, timeout=10)
         if res.status_code == 200:
             content = base64.b64decode(res.json()["content"]).decode()
             ESP_RESULTS = json.loads(content)
-            save_esp_results()
-            print("[INFO] Loaded esp_results from GitHub")
+            with open(ESP_RESULTS_FILE, "w") as f:
+                json.dump(ESP_RESULTS, f, indent=2)
+            print("[INFO] Loaded and saved esp_results from GitHub")
             return
     except Exception as e:
         print(f"[WARN] Failed load from GitHub: {e}")
@@ -67,7 +63,7 @@ def save_esp_results():
     try:
         with open(ESP_RESULTS_FILE, "w") as f:
             json.dump(ESP_RESULTS, f, indent=2)
-        print("[INFO] Saved esp_results to local")
+        print("[INFO] Saved esp_results locally")
     except Exception as e:
         print(f"[ERROR] Save local failed: {e}")
 
@@ -75,43 +71,52 @@ load_esp_results()
 
 # ================= ROBOFLOW =================
 rf_client = None
-
 def get_rf_client():
     global rf_client
     if rf_client is None:
         rf_client = InferenceHTTPClient(
-            api_url="https://serverless.roboflow.com",
+            api_url="https://detect.roboflow.com",  # Ubah ke detect kalau pakai model detect biasa
             api_key=ROBOFLOW_API_KEY
         )
     return rf_client
 
 WORKSPACE_NAME = "my-workspace-rrwxa"
 WORKFLOW_ID = "detect-count-and-visualize"
-TARGET_LABEL = "male"          # Sama seperti di Colab kamu
-CONF_THRESHOLD = 0.4           # Bisa diubah ke 0.3 kalau masih 0
+TARGET_LABEL = "male"  # Ganti kalau target female/indukan
+CONF_THRESHOLD = 0.4
 
 # ================= HEALTH =================
 @app.route("/", methods=["GET"])
 def health():
-    return "AI server running (Female Detection) - Ready!"
+    return jsonify({"status": "ok", "message": "AI server running - Female/Male Detection Ready"})
 
 # ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
 def upload():
     if not request.data:
-        return jsonify({"error": "no image"}), 400
+        return jsonify({"error": "no image data"}), 400
 
     esp_id = request.headers.get("X-ESP-ID", "unknown")
-    timestamp = int(time.time())
-    filename = f"{esp_id}_{timestamp}.jpg"
-    print(f"[INFO] Upload dari {esp_id}, size: {len(request.data)} bytes")
+    # Ambil timestamp dari ESP kalau dikirim via header, fallback server time
+    esp_timestamp = request.headers.get("X-Timestamp")
+    if esp_timestamp:
+        try:
+            timestamp = int(esp_timestamp)
+        except:
+            timestamp = int(time.time())
+    else:
+        timestamp = int(time.time())
 
-    # Save sementara
+    filename = f"{esp_id}_{timestamp}.jpg"
+    print(f"[INFO] Upload dari {esp_id} | timestamp: {timestamp} | size: {len(request.data)} bytes")
+
+    # Simpan sementara
+    temp_path = filename
     try:
-        with open(filename, "wb") as f:
+        with open(temp_path, "wb") as f:
             f.write(request.data)
     except Exception as e:
-        return jsonify({"error": "save image failed", "detail": str(e)}), 500
+        return jsonify({"error": "save temp image failed", "detail": str(e)}), 500
 
     # ===== ROBOFLOW WORKFLOW =====
     try:
@@ -119,118 +124,110 @@ def upload():
         result = rf.run_workflow(
             workspace_name=WORKSPACE_NAME,
             workflow_id=WORKFLOW_ID,
-            images={"image": filename},
-            use_cache=False  # Sama seperti Colab, tapi False biar fresh
+            images={"image": temp_path},
+            use_cache=False
         )
-        print("[INFO] Roboflow workflow selesai")
-
-        # DEBUG: Print raw result supaya kelihatan di Render Logs
-        print("[DEBUG] Raw result type:", type(result))
-        print("[DEBUG] Raw result:", json.dumps(result, indent=2, default=str))
-
+        print("[DEBUG] Raw Roboflow result:", json.dumps(result, indent=2, default=str))
     except Exception as e:
-        os.remove(filename)
-        return jsonify({"error": "roboflow failed", "detail": str(e)}), 500
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return jsonify({"error": "roboflow workflow failed", "detail": str(e)}), 500
 
-    # ===== UPLOAD IMAGE TO GITHUB =====
+    # Parse predictions (lebih robust)
+    predictions = []
     try:
-        with open(filename, "rb") as f:
-            content_b64 = base64.b64encode(f.read()).decode()
-
-        put_url = f"{GITHUB_API_IMAGES}/{esp_id}/{filename}"
-        res = requests.put(
-            put_url,
-            headers=GITHUB_HEADERS,
-            json={
-                "message": f"Upload dari {esp_id}: {filename}",
-                "content": content_b64
-            },
-            timeout=15
-        )
-        if res.status_code in (200, 201):
-            print("[INFO] Image uploaded to GitHub")
-        else:
-            print(f"[WARN] GitHub upload gagal: {res.status_code} - {res.text}")
+        if isinstance(result, list) and result:
+            for item in result:
+                if "predictions" in item:
+                    predictions.extend(item["predictions"])
+        elif isinstance(result, dict):
+            if "predictions" in result:
+                predictions = result["predictions"]
+            elif "result" in result and isinstance(result["result"], list):
+                predictions = result["result"]
     except Exception as e:
-        print(f"[WARN] GitHub upload error: {e}")
+        print(f"[WARN] Parse predictions failed: {e}")
 
-    if os.path.exists(filename):
-        os.remove(filename)
-
-    # ===== PARSE PREDICTIONS - PERSIS seperti di Colab kamu =====
-    predictions_list = None
-
-    # Extract raw predictions dari berbagai kemungkinan struktur
-    raw_predictions_output = None
-    if isinstance(result, dict) and "predictions" in result:
-        raw_predictions_output = result["predictions"]
-    elif isinstance(result, list) and result and "predictions" in result[0]:
-        raw_predictions_output = result[0]["predictions"]
-
-    # Normalisasi jadi list of prediction objects
-    if raw_predictions_output:
-        if isinstance(raw_predictions_output, list):
-            predictions_list = raw_predictions_output
-        elif isinstance(raw_predictions_output, dict) and "predictions" in raw_predictions_output:
-            predictions_list = raw_predictions_output["predictions"]
-
-    filtered = []
-    if predictions_list:
-        for p in predictions_list:
-            label = p.get("class") or p.get("label") or "obj"
-            conf = p.get("confidence") or p.get("score") or 0
-            if label.lower() == TARGET_LABEL.lower() and conf >= CONF_THRESHOLD:
-                filtered.append({
-                    "label": label,
-                    "confidence": round(conf * 100, 2)
-                })
-
+    filtered = [
+        p for p in predictions
+        if p.get("class", "").lower() == TARGET_LABEL.lower() and p.get("confidence", 0) >= CONF_THRESHOLD
+    ]
     detected_count = len(filtered)
 
-    # ===== UPDATE RESULTS & BACKUP =====
+    # ===== UPLOAD IMAGE TO GITHUB =====
+    github_success = False
+    try:
+        with open(temp_path, "rb") as f:
+            content_b64 = base64.b64encode(f.read()).decode()
+
+        folder_path = f"{GITHUB_FOLDER}/esp_{esp_id.split('_')[-1] if '_' in esp_id else esp_id}"
+        put_url = f"{GITHUB_API_ROOT}/{folder_path}/{filename}"
+
+        # Cek SHA kalau file sudah ada (opsional, tapi aman)
+        get_res = requests.get(put_url, headers=GITHUB_HEADERS, timeout=5)
+        sha = get_res.json().get("sha") if get_res.status_code == 200 else None
+
+        payload = {
+            "message": f"upload from esp {esp_id} ({filename})",
+            "content": content_b64
+        }
+        if sha:
+            payload["sha"] = sha
+
+        res = requests.put(put_url, headers=GITHUB_HEADERS, json=payload, timeout=15)
+        if res.status_code in (200, 201):
+            github_success = True
+            print("[INFO] Image uploaded to GitHub successfully")
+        else:
+            print(f"[WARN] GitHub upload failed: {res.status_code} - {res.text}")
+    except Exception as e:
+        print(f"[ERROR] GitHub upload exception: {e}")
+
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+
+    # ===== UPDATE RESULTS (MERGE, BUKAN OVERWRITE) =====
     with ESP_LOCK:
         ESP_RESULTS[esp_id] = {
             "count": detected_count,
-            "last_update": int(time.time() * 1000)
+            "last_update": timestamp * 1000  # pakai timestamp gambar, bukan waktu server
         }
         save_esp_results()
 
+        # Backup ke GitHub esp_results.json
         try:
-            json_content = json.dumps(ESP_RESULTS).encode()
+            json_content = json.dumps(ESP_RESULTS, indent=2).encode()
             content_b64 = base64.b64encode(json_content).decode()
 
-            get_res = requests.get(
-                f"{GITHUB_API_ROOT}/esp_results.json",
-                headers=GITHUB_HEADERS,
-                timeout=10
-            )
+            json_path = f"{GITHUB_API_ROOT}/esp_results.json"
+            get_res = requests.get(json_path, headers=GITHUB_HEADERS, timeout=10)
             sha = get_res.json().get("sha") if get_res.status_code == 200 else None
 
-            put_data = {
-                "message": f"Update dari {esp_id} - {time.strftime('%Y-%m-%d %H:%M')}",
+            payload = {
+                "message": f"Update results from {esp_id} - {time.strftime('%Y-%m-%d %H:%M')}",
                 "content": content_b64
             }
             if sha:
-                put_data["sha"] = sha
+                payload["sha"] = sha
 
-            requests.put(
-                f"{GITHUB_API_ROOT}/esp_results.json",
-                headers=GITHUB_HEADERS,
-                json=put_data,
-                timeout=15
-            )
+            put_res = requests.put(json_path, headers=GITHUB_HEADERS, json=payload, timeout=15)
+            if put_res.status_code in (200, 201):
+                print("[INFO] esp_results.json updated on GitHub")
+            else:
+                print(f"[WARN] GitHub JSON update failed: {put_res.text}")
         except Exception as e:
-            print(f"[WARN] Backup JSON error: {e}")
+            print(f"[WARN] GitHub JSON backup failed: {e}")
 
     total_all = sum(v["count"] for v in ESP_RESULTS.values())
 
     return jsonify({
         "status": "ok",
         "esp_id": esp_id,
-        "detected_this_esp": detected_count,  # Ubah nama biar netral (male/female)
-        "total_detected_all_esp": total_all,
+        "detected_this_esp": detected_count,
+        "total_all_esp": total_all,
         "per_esp": ESP_RESULTS,
-        "objects": filtered
+        "objects": filtered,
+        "github_image_success": github_success
     })
 
 # ================= SUMMARY =================
@@ -242,7 +239,6 @@ def summary():
             "per_esp": ESP_RESULTS
         })
 
-# ================= RUN =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
