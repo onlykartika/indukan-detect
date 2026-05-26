@@ -1,4 +1,11 @@
 flask
-gunicorn
-inference-sdk
 requests
+numpy
+opencv-python-headless
+Pillow==10.4.0
+supervision==0.26.0
+inference-sdk==1.2.10
+dataclasses-json
+pydantic
+tqdm
+urllib3
