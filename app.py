@@ -26,6 +26,7 @@ ESP_LOCK         = Lock()
 GITHUB_REPO       = "onlykartika/ESP32-CAM"
 GITHUB_FOLDER     = "images"
 GITHUB_API_ROOT   = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
+GITHUB_API_IMAGES = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
 GITHUB_HEADERS    = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "User-Agent":    "Render-AI-Server",
@@ -60,8 +61,8 @@ def load_esp_results():
             headers=GITHUB_HEADERS, timeout=10
         )
         if res.status_code == 200:
-            content    = base64.b64decode(res.json()["content"]).decode()
-            data       = json.loads(content)
+            content = base64.b64decode(res.json()["content"]).decode()
+            data    = json.loads(content)
             if isinstance(data, dict):
                 ESP_RESULTS = data
                 save_esp_results()
@@ -76,7 +77,6 @@ def load_esp_results():
 load_esp_results()
 
 # ================= ROBOFLOW CONFIG =================
-# ⚠️ Tetap pakai konfigurasi asli — JANGAN diubah
 WORKSPACE_NAME = "my-workspace-rrwxa"
 WORKFLOW_ID    = "detect-count-and-visualize"
 TARGET_LABEL   = "female"
@@ -88,14 +88,13 @@ def get_rf_client():
     global rf_client
     if rf_client is None:
         rf_client = InferenceHTTPClient(
-            api_url="https://detect.roboflow.com",  # tetap pakai detect
+            api_url="https://detect.roboflow.com",
             api_key=ROBOFLOW_API_KEY
         )
     return rf_client
 
 # ================= ROBOFLOW REST FALLBACK =================
 def run_roboflow_rest(image_bytes):
-    """Fallback: kirim langsung via REST tanpa SDK"""
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     url       = f"https://serverless.roboflow.com/{WORKSPACE_NAME}/{WORKFLOW_ID}"
     payload   = {
@@ -116,14 +115,9 @@ def run_roboflow_rest(image_bytes):
 
 # ================= PARSE PREDICTIONS =================
 def parse_predictions(result):
-    """
-    Coba semua kemungkinan struktur output Roboflow.
-    Logika sama persis dengan Colab yang berhasil.
-    """
     predictions = []
 
     try:
-        # Struktur list (workflow output)
         if isinstance(result, list) and result:
             for item in result:
                 if not isinstance(item, dict):
@@ -135,7 +129,6 @@ def parse_predictions(result):
                     elif isinstance(raw, dict) and "predictions" in raw:
                         predictions.extend(raw["predictions"])
 
-        # Struktur dict
         elif isinstance(result, dict):
             if "predictions" in result:
                 raw = result["predictions"]
@@ -155,11 +148,11 @@ def parse_predictions(result):
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({
-        "status":          "ok",
-        "message":         "AI server running - Male Detection Ready",
-        "target_label":    TARGET_LABEL,
-        "conf_threshold":  CONF_THRESHOLD,
-        "workspace":       WORKSPACE_NAME
+        "status":         "ok",
+        "message":        "AI server running - Female Detection Ready",
+        "target_label":   TARGET_LABEL,
+        "conf_threshold": CONF_THRESHOLD,
+        "workspace":      WORKSPACE_NAME
     })
 
 # ================= UPLOAD =================
@@ -180,7 +173,6 @@ def upload():
 
     esp_id = request.headers.get("X-ESP-ID", "unknown")
 
-    # Ambil timestamp dari ESP jika ada
     esp_timestamp = request.headers.get("X-Timestamp")
     try:
         timestamp = int(esp_timestamp) if esp_timestamp else int(time.time())
@@ -234,14 +226,15 @@ def upload():
             }), 500
 
     # ===== UPLOAD GAMBAR KE GITHUB =====
+    # FIX: pakai path simpel langsung ke images/{esp_id}/{filename}
     github_success = False
     try:
         with open(filename, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
 
-        folder_path = f"{GITHUB_FOLDER}/esp_{esp_id.split('_')[-1] if '_' in esp_id else esp_id}"
-        put_url     = f"{GITHUB_API_ROOT}/{folder_path}/{filename}"
+        put_url = f"{GITHUB_API_IMAGES}/{esp_id}/{filename}"
 
+        # Cek apakah file sudah ada (perlu sha untuk update)
         get_res = requests.get(put_url, headers=GITHUB_HEADERS, timeout=5)
         sha     = get_res.json().get("sha") if get_res.status_code == 200 else None
 
@@ -255,9 +248,9 @@ def upload():
         res = requests.put(put_url, headers=GITHUB_HEADERS, json=payload, timeout=15)
         if res.status_code in (200, 201):
             github_success = True
-            print(f"[INFO] GitHub image: {res.status_code}")
+            print(f"[INFO] GitHub image upload sukses: {res.status_code}")
         else:
-            print(f"[WARN] GitHub image failed: {res.status_code} - {res.text}")
+            print(f"[WARN] GitHub image gagal: {res.status_code} - {res.text[:300]}")
     except Exception as e:
         print(f"[WARN] GitHub image error: {e}")
 
@@ -295,6 +288,7 @@ def upload():
         }
         save_esp_results()
 
+        # Sync esp_results.json ke GitHub
         try:
             json_content = json.dumps(ESP_RESULTS, indent=2).encode()
             content_b64  = base64.b64encode(json_content).decode()
