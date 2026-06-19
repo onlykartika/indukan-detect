@@ -23,7 +23,7 @@ ESP_RESULTS      = {}
 ESP_LOCK         = Lock()
 
 # ================= GITHUB CONFIG =================
-GITHUB_REPO       = "onlykartika/ESP32-CAM"
+GITHUB_REPO       = "onlykartika/indukan-detect"
 GITHUB_FOLDER     = "images"
 GITHUB_API_ROOT   = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
 GITHUB_API_IMAGES = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FOLDER}"
